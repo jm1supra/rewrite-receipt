@@ -67,9 +67,6 @@ public class SetMethodsStatic extends Recipe {
     public TreeVisitor<?, ExecutionContext> getVisitor() {
         return new JavaIsoVisitor<ExecutionContext>() {
 
-            private final JavaTemplate addStatic = JavaTemplate.builder(this::getCursor, "static")
-                    .build();
-
             @Override
             public J.MethodDeclaration visitMethodDeclaration(J.MethodDeclaration method, ExecutionContext ctx) {
                 J.MethodDeclaration m = super.visitMethodDeclaration(method, ctx);
