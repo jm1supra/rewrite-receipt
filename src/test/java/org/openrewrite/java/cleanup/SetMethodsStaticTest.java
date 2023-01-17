@@ -11,7 +11,52 @@ class SetMethodsStaticTest implements RewriteTest {
 
     @Override
     public void defaults(RecipeSpec spec) {
-        spec.recipe(new SetMethodsStatic("org.openrewrite.java.cleanup.SetMethodsStatic"));
+        spec.recipe(new SetMethodsStatic());
+    }
+
+    @Test
+    void Serializable() {
+        rewriteRun(
+            java(
+                """
+                    import java.io.*;
+                    
+                    class Utilities implements java.io.Serializable {
+                        private static String magicWord = "magic";
+                        private static int magicNumber = 2;
+                        private String instantName;
+                        
+                        private static String getMagicWord() {
+                            return magicWord;
+                        }
+                       
+                        private void setName(String name) {
+                            this.instantName = name;
+                        }
+                       
+                        private static void setMagicWord(String value) {
+                            magicWord = value;
+                        }
+                        
+                        public void setMagicNumber(int value) {
+                            magicNumber = value;
+                        }
+                        
+                        private void writeObject(java.io.ObjectOutputStream out) throws IOException {
+                        
+                        }
+                        
+                        private void readObject(java.io.ObjectInputStream in) throws IOException, ClassNotFoundException {
+                        
+                        }
+                        
+                        private void readObjectNoData() throws ObjectStreamException {
+                        
+                        }
+                    }
+                    """
+            )
+        );
     }
 
     @Test

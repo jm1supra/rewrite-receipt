@@ -15,19 +15,12 @@
  */
 package org.openrewrite.java.cleanup;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.EqualsAndHashCode;
-import lombok.NonNull;
 import lombok.Value;
 import org.openrewrite.*;
 import org.openrewrite.internal.ListUtils;
 import org.openrewrite.java.JavaIsoVisitor;
-import org.openrewrite.java.JavaTemplate;
-import org.openrewrite.java.tree.J;
-import org.openrewrite.java.tree.JavaType;
-import org.openrewrite.java.tree.Space;
-import org.openrewrite.java.tree.Statement;
+import org.openrewrite.java.tree.*;
 import org.openrewrite.marker.Markers;
 
 import javax.annotation.Nullable;
@@ -43,7 +36,8 @@ import java.util.stream.Collectors;
 public class SetMethodsStatic extends Recipe {
     private static final String VAR = "var";
     private static final String METHOD = "method";
-    private static final String FOUND = "found";
+    private static final String INSTANCE_ACCESS_FOUND = "found";
+    private static final String IS_SERIALIZABLE = "isSerializable";
 
     @Override
     public String getDisplayName() {
@@ -55,21 +49,13 @@ public class SetMethodsStatic extends Recipe {
         return "Non-overridable methods (private or final) methods that don't access instance data should be static.";
     }
 
-    @NonNull
-    String fullyQualifiedClassName;
-
-    @JsonCreator
-    public SetMethodsStatic(@NonNull @JsonProperty("fullyQualifiedClassName") String fullyQualifiedClassName) {
-        this.fullyQualifiedClassName = fullyQualifiedClassName;
-    }
-
     @Override
     public TreeVisitor<?, ExecutionContext> getVisitor() {
         return new JavaIsoVisitor<ExecutionContext>() {
 
             @Override
-            public J.MethodDeclaration visitMethodDeclaration(J.MethodDeclaration method, ExecutionContext ctx) {
-                J.MethodDeclaration m = super.visitMethodDeclaration(method, ctx);
+            public J.MethodDeclaration visitMethodDeclaration(J.MethodDeclaration methodDeclaration, ExecutionContext ctx) {
+                J.MethodDeclaration m = super.visitMethodDeclaration(methodDeclaration, ctx);
 
                 //ignore if method is already static
                 if (m.hasModifier(J.Modifier.Type.Static)) {
@@ -81,8 +67,24 @@ public class SetMethodsStatic extends Recipe {
                     return m;
                 }
 
-                boolean nonStaticAccessFound = getCursor().getMessage(FOUND) == null;
-                if(nonStaticAccessFound) {
+                Cursor cdCursor = getCursor().dropParentUntil(parent -> parent instanceof J.ClassDeclaration);
+
+                /*
+                ignore following methods if the class implements Serializable
+                todo: instead of using simpleName, it would be more accurate to compare method objects
+                 */
+                if (cdCursor.getMessage(IS_SERIALIZABLE) != null) {
+                    switch (m.getSimpleName()) {
+                        case "writeObject":
+                        case "readObject":
+                        case "readObjectNoData":
+                            return m;
+                        default:
+                    }
+                }
+
+                //there was no instance data access found
+                if(getCursor().getMessage(INSTANCE_ACCESS_FOUND) == null) {
                     //no need to keep the final modifier, since this will create another code smell.
                     List<J.Modifier> list = m.getModifiers().stream()
                             .filter(modifier->!(modifier.getType().equals(J.Modifier.Type.Final)))
@@ -110,65 +112,80 @@ public class SetMethodsStatic extends Recipe {
 
             @Override
             public J.ClassDeclaration visitClassDeclaration(J.ClassDeclaration classDecl, ExecutionContext ctx) {
-
                 Cursor c = getCursor();
+
+                //check if the class implements Serializable
+                if(classDecl.getImplements() != null && !classDecl.getImplements().isEmpty()) {
+                    boolean isSerializable = classDecl.getImplements().stream().filter(fa -> {
+                        J.FieldAccess fs = (J.FieldAccess) fa;
+                        return fs.getName().getSimpleName().equals("Serializable");
+                    }).count() != 0;
+
+                    if(isSerializable)
+                        c.putMessage(IS_SERIALIZABLE, true);
+                }
+
                 for(Statement s: classDecl.getBody().getStatements()) {
                     if(s instanceof J.VariableDeclarations) {
                         J.VariableDeclarations vd = (J.VariableDeclarations)s;
-                        if(!vd.hasModifier(J.Modifier.Type.Static)) {
-                            Set<String> set = c.getMessage(VAR, new HashSet<>());
-                            set.addAll(vd
-                                    .getVariables()
-                                    .stream()
-                                    .map(J.VariableDeclarations.NamedVariable::getSimpleName)
-                                    .collect(Collectors.toList()));
-                            c.putMessage(VAR, set);
-                        }
+                        if(vd.hasModifier(J.Modifier.Type.Static))
+                            continue;
+
+                        Set<String> varSet = c.getMessage(VAR, new HashSet<>());
+                        varSet.addAll(vd
+                                .getVariables()
+                                .stream()
+                                .map(J.VariableDeclarations.NamedVariable::getSimpleName)
+                                .collect(Collectors.toList()));
+                        c.putMessage(VAR, varSet);
                     }
                     else if(s instanceof J.MethodDeclaration) {
                         J.MethodDeclaration md = (J.MethodDeclaration)s;
-                        if(!md.hasModifier(J.Modifier.Type.Static)) {
-                            Set<JavaType.Method> set = c.getMessage(METHOD, new HashSet<>());
-                            if(md.getMethodType() != null)
-                                set.add(md.getMethodType());
-                            c.putMessage(METHOD, set);
-                        }
+                        if(md.hasModifier(J.Modifier.Type.Static))
+                            continue;
+
+                        Set<JavaType.Method> methodSet = c.getMessage(METHOD, new HashSet<>());
+                        if(md.getMethodType() != null)
+                            methodSet.add(md.getMethodType());
+                        c.putMessage(METHOD, methodSet);
                     }
                 }
-
                 return super.visitClassDeclaration(classDecl, ctx);
             }
 
             @Override
-            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation method, ExecutionContext executionContext) {
-                J.MethodInvocation m = super.visitMethodInvocation(method, executionContext);
+            public J.MethodInvocation visitMethodInvocation(J.MethodInvocation methodInvocation, ExecutionContext executionContext) {
+                J.MethodInvocation m = super.visitMethodInvocation(methodInvocation, executionContext);
 
-                Cursor cdCursor = getCursor().dropParentUntil(parent -> parent instanceof J.ClassDeclaration);
                 Cursor mdCursor = this.dropParentUntil(getCursor(), parent -> parent instanceof J.MethodDeclaration);
                 if(mdCursor == null)
                     return m;
 
+                Cursor cdCursor = getCursor().dropParentUntil(parent -> parent instanceof J.ClassDeclaration);
+
+                //check if the method is the instance member of the class
                 Set<JavaType.Method> set = cdCursor.getMessage(METHOD);
-                if(set != null && method.getMethodType() != null && set.contains(method.getMethodType())) {
-                    mdCursor.putMessage(FOUND, true);
+                if(set != null && m.getMethodType() != null && set.contains(m.getMethodType())) {
+                    mdCursor.putMessage(INSTANCE_ACCESS_FOUND, true);
                 }
                 return m;
             }
 
             @Override
-            public J.Identifier visitIdentifier(J.Identifier i, ExecutionContext executionContext) {
+            public J.Identifier visitIdentifier(J.Identifier identifier, ExecutionContext executionContext) {
 
-                Cursor mc = this.dropParentUntil(getCursor(), parent -> parent instanceof J.MethodDeclaration);
-                if(mc == null)
-                    return i;
+                Cursor mdCursor = this.dropParentUntil(getCursor(), parent -> parent instanceof J.MethodDeclaration);
+                if(mdCursor == null)
+                    return identifier;
 
-                Cursor c = getCursor().dropParentUntil(parent -> parent instanceof J.ClassDeclaration);
-                Set<String> set = c.getMessage(VAR);
-                if(set != null && set.contains(i.getSimpleName())) {
-                    mc.putMessage(FOUND, true);
+                //check if the identifier name matches the instance variable of the class
+                Cursor cdCursor = getCursor().dropParentUntil(parent -> parent instanceof J.ClassDeclaration);
+                Set<String> set = cdCursor.getMessage(VAR);
+                if(set != null && set.contains(identifier.getSimpleName())) {
+                    mdCursor.putMessage(INSTANCE_ACCESS_FOUND, true);
                 }
 
-                return i;
+                return identifier;
             }
 
             @Nullable
@@ -177,7 +194,6 @@ public class SetMethodsStatic extends Recipe {
                 while (cursor != null && !valuePredicate.test(cursor.getValue())) {
                     cursor = cursor.getParent();
                 }
-
                 return cursor;
             }
         };
